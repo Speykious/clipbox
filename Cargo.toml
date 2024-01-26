@@ -1,0 +1,8 @@
+[package]
+name = "clipbox"
+description = "Cross-platform clipboard library."
+version = "0.1.0"
+edition = "2021"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+loki-linux = { git = "https://github.com/loki-chat/lokinit.git" }
