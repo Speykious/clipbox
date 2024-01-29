@@ -1,12 +1,10 @@
 use std::error::Error;
 use std::ffi::{c_int, c_ulong, c_void, CStr};
 use std::fmt;
-use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
 use loki_linux::x11::{
-    errcode, et, prop_mode, xevent_mask, Atom, LibX11, XDisplay, XErrorEvent, XEvent,
-    XSelectionEvent, XWindow,
+    errcode, et, prop_mode, xevent_mask, Atom, LibX11, XDisplay, XEvent, XSelectionEvent, XWindow,
 };
 
 /// Just a boilerplate function to construct a const `&CStr`.
@@ -78,20 +76,6 @@ pub struct Atoms {
 
     /// Property type: targets (list of atoms)
     pub targets: Atom,
-}
-
-pub unsafe extern "C" fn x11_error_handler(
-    _display: *mut XDisplay,
-    event: *mut XErrorEvent,
-) -> i32 {
-    match event.as_ref() {
-        Some(event) => eprintln!("X11: error (code {})", event.error_code),
-        None => {
-            eprintln!("X11 called the error handler without an error event or a display, somehow")
-        }
-    }
-
-    0
 }
 
 unsafe fn intern_atom(x: &LibX11, display: NonNull<XDisplay>, name: &CStr) -> Atom {
@@ -179,7 +163,6 @@ impl X11Clipboard {
     pub fn init() -> Result<Self, Box<dyn Error>> {
         unsafe {
             let x = LibX11::new()?;
-            (x.XSetErrorHandler)(Some(x11_error_handler));
 
             // Open the default X11 display
             let display = (x.XOpenDisplay)(std::ptr::null());
@@ -291,24 +274,13 @@ impl X11Clipboard {
 
         if xevent.property != self.atoms.clipbox {
             let property = get_atom_name(&self.x, self.display, xevent.property);
-            eprintln!("We got {:?} instead of \"CLIPBOX\"", property);
+            return Err(format!("We got {:?} instead of \"CLIPBOX\"", property).into());
         }
-
-        let selection = get_atom_name(&self.x, self.display, xevent.selection);
-        let target = get_atom_name(&self.x, self.display, xevent.target);
-        let property = get_atom_name(&self.x, self.display, xevent.property);
-
-        eprintln!(
-            "Selection notify at {}ms: s{:?} t{:?} p{:?}",
-            xevent.time, selection, target, property
-        );
 
         Ok(xevent)
     }
 
     fn get_clipbox_property(&self) -> Result<XWindowProperty, Box<dyn Error>> {
-        const PROPERTY_BUFFER_LEN: i64 = 8192;
-
         let mut ty: Atom = 0;
         let mut format: c_int = 8;
         let mut nitems: c_ulong = 0;
@@ -321,7 +293,7 @@ impl X11Clipboard {
                 self.window,
                 self.atoms.clipbox,
                 0,
-                PROPERTY_BUFFER_LEN,
+                8192, // i64::MAX,
                 0,
                 0,
                 &mut ty,
@@ -369,6 +341,7 @@ impl X11Clipboard {
             self.get_selection_event(atom_selection, atom_target)?
         };
 
+        // TODO: fetch property incrementally with INCR atom
         let clipbox_prop = self.get_clipbox_property()?;
         dbg!(&clipbox_prop);
 
