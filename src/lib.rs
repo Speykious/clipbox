@@ -22,11 +22,20 @@ pub unsafe fn main_fuckery() -> Result<(), Box<dyn Error>> {
     println!("[[Init X11 clipboard]]");
     let clipboard = X11Clipboard::init()?;
 
-    println!("[[Getting selection]]");
-    let selection = clipboard.get_selection(atom_names::CLIPBOARD, mime_types::IMAGE_PNG)?;
+    println!("[[Getting targets]]");
+    let targets = clipboard.get_targets(atom_names::CLIPBOARD)?;
+    dbg!(&targets);
 
-    println!("[[Writing image]]");
-    fs::write("image.png", selection)?;
+    println!("[[Getting selection]]");
+    if targets.contains(&mime_types::IMAGE_PNG) {
+        let selection = clipboard.get_selection(atom_names::CLIPBOARD, mime_types::IMAGE_PNG)?;
+        println!("[[Writing image]]");
+        fs::write("image.png", selection)?;
+    } else {
+        let selection = clipboard.get_selection(atom_names::CLIPBOARD, atom_names::STRING)?;
+        println!("[[Writing text]]");
+        fs::write("string.txt", selection)?;
+    }
 
     Ok(())
 }

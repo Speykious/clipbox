@@ -31,6 +31,8 @@ pub mod atom_names {
     pub const CLIPBOARD: &CStr = const_cstr(b"CLIPBOARD\0");
     /// Our custom dummy atom
     pub const CLIPBOX: &CStr = const_cstr(b"CLIPBOX\0");
+    /// Our custom dummy atom
+    pub const CLIPBOX_DUMMY: &CStr = const_cstr(b"CLIPBOX_DUMMY\0");
 
     /// Property type: ASCII string
     pub const STRING: &CStr = const_cstr(b"STRING\0");
@@ -69,8 +71,10 @@ pub struct Atoms {
     pub secondary: Atom,
     /// The actual clipboard that most apps use
     pub clipboard: Atom,
-    /// Our custom dummy atom
+    /// Our custom data atom
     pub clipbox: Atom,
+    /// Our custom dummy atom, to get a compliant timestamp
+    pub clipbox_dummy: Atom,
 
     /// Property type: ASCII string
     pub string: Atom,
@@ -108,9 +112,14 @@ struct XWindowProperty<'a> {
 impl<'a> XWindowProperty<'a> {
     /// Checks that the format size is compatible with the size of `T`
     fn check_format_compatible<T>(&self) -> Result<(), Box<dyn Error>> {
-        match self.format as usize == 8 * std::mem::size_of::<T>() {
+        let t_format: usize = 8 * std::mem::size_of::<T>();
+        match self.format as usize == t_format {
             true => Ok(()),
-            false => Err(format!("Invalid format ({} bits instead of 8).", self.format).into()),
+            false => Err(format!(
+                "Invalid format ({} bits instead of {}).",
+                self.format, t_format
+            )
+            .into()),
         }
     }
 
@@ -189,11 +198,15 @@ impl X11Clipboard {
             // Create a window to trap events
             let window = (x.XCreateSimpleWindow)(display.as_ptr(), root, 0, 0, 1, 1, 0, 0, 0);
 
+            // Select property change events
+            (x.XSelectInput)(display.as_ptr(), window, xevent_mask::PROPERTY_CHANGE);
+
             let atoms = Atoms {
                 primary: intern_atom(&x, display, atom_names::PRIMARY),
                 secondary: intern_atom(&x, display, atom_names::SECONDARY),
                 clipboard: intern_atom(&x, display, atom_names::CLIPBOARD),
                 clipbox: intern_atom(&x, display, atom_names::CLIPBOX),
+                clipbox_dummy: intern_atom(&x, display, atom_names::CLIPBOX_DUMMY),
                 string: intern_atom(&x, display, atom_names::STRING),
                 text: intern_atom(&x, display, atom_names::TEXT),
                 utf8_string: intern_atom(&x, display, atom_names::UTF8_STRING),
@@ -218,19 +231,12 @@ impl X11Clipboard {
 
     /// Get a compliant timestamp for selection requests
     unsafe fn get_compliant_timestamp(&self) -> c_ulong {
-        // Select property change events
-        (self.x.XSelectInput)(
-            self.display.as_ptr(),
-            self.window,
-            xevent_mask::PROPERTY_CHANGE,
-        );
-
         // Send dummy change property request to obtain a timestamp from its resulting event
         // This is because it is disincentivized to use CurrentTime when sending a ConvertSelection request
         (self.x.XChangeProperty)(
             self.display.as_ptr(),
             self.window,
-            self.atoms.clipbox,
+            self.atoms.clipbox_dummy,
             self.atoms.string,
             8,
             prop_mode::APPEND,
@@ -244,7 +250,7 @@ impl X11Clipboard {
             if xevent.type_id == et::PROPERTY_NOTIFY {
                 let xevent = xevent.xproperty;
 
-                if xevent.atom == self.atoms.clipbox {
+                if xevent.atom == self.atoms.clipbox_dummy {
                     return xevent.time;
                 }
             }
@@ -344,6 +350,24 @@ impl X11Clipboard {
         })
     }
 
+    pub fn get_targets(&self, selection: &CStr) -> Result<Vec<&CStr>, Box<dyn Error>> {
+        unsafe {
+            let atom_selection = intern_atom(&self.x, self.display, selection);
+            self.get_selection_event(atom_selection, self.atoms.targets)?
+        };
+
+        let clipbox_prop = self.get_clipbox_property()?;
+
+        let targets = clipbox_prop
+            .into_vec::<u32>()?
+            .into_iter()
+            .filter(|&atom| atom != 0)
+            .map(|atom| unsafe { get_atom_name(&self.x, self.display, atom as Atom) })
+            .collect::<Vec<_>>();
+
+        Ok(targets)
+    }
+
     pub fn get_selection(
         &self,
         selection: &CStr,
@@ -365,12 +389,8 @@ impl X11Clipboard {
 
         let clipbox_prop = self.get_clipbox_property()?;
 
-        let type_name = unsafe { get_atom_name(&self.x, self.display, clipbox_prop.ty) };
-        dbg!(type_name, &clipbox_prop);
-
         if clipbox_prop.ty == self.atoms.incr {
             // We got an INCR atom, fetch property incrementally
-            eprintln!("Fetching property incrementally");
             let mut data = Vec::new();
 
             loop {
@@ -391,15 +411,12 @@ impl X11Clipboard {
 
                             const NEW_VALUE: c_int = 0;
                             if xevent.state == NEW_VALUE {
-                                let atom_name = get_atom_name(&self.x, self.display, xevent.atom);
-                                eprintln!("New value! (property {:?})", atom_name);
                                 break;
                             }
                         }
                     }
 
                     let clipbox_prop = self.get_clipbox_property()?;
-                    dbg!(&clipbox_prop);
 
                     if clipbox_prop.nitems == 0 {
                         break;
