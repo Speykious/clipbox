@@ -1,10 +1,11 @@
 use std::error::Error;
-use std::ffi::{c_int, c_ulong, c_void, CStr};
+use std::ffi::{c_int, c_long, c_ulong, c_void, CStr};
 use std::fmt;
 use std::ptr::{self, NonNull};
 
 use loki_linux::x11::{
-    errcode, et, prop_mode, xevent_mask, Atom, LibX11, XDisplay, XEvent, XSelectionEvent, XWindow,
+    errcode, et, prop_mode, xevent_mask, Atom, Bool, LibX11, XDisplay, XEvent, XSelectionEvent,
+    XWindow,
 };
 
 /// Just a boilerplate function to construct a const `&CStr`.
@@ -39,10 +40,14 @@ pub mod atom_names {
     pub const UTF8_STRING: &CStr = const_cstr(b"UTF8_STRING\0");
     /// Property type: targets (list of atoms)
     pub const TARGETS: &CStr = const_cstr(b"TARGETS\0");
+    /// Property type: incremental data fetching
+    pub const INCR: &CStr = const_cstr(b"INCR\0");
 }
 
 /// Some commonly used mime types. They're literally infinite so the list cannot be exclusive.
 pub mod mime_types {
+    #![allow(unused)]
+
     use std::ffi::CStr;
 
     use super::const_cstr;
@@ -76,6 +81,9 @@ pub struct Atoms {
 
     /// Property type: targets (list of atoms)
     pub targets: Atom,
+
+    /// Property type: incremental data fetching
+    pub incr: Atom,
 }
 
 unsafe fn intern_atom(x: &LibX11, display: NonNull<XDisplay>, name: &CStr) -> Atom {
@@ -94,7 +102,7 @@ struct XWindowProperty<'a> {
     pub format: c_int,
     pub nitems: c_ulong,
     pub bytes_remaining: c_ulong,
-    pub prop: NonNull<c_void>,
+    pub data: NonNull<c_void>,
 }
 
 impl<'a> XWindowProperty<'a> {
@@ -106,27 +114,35 @@ impl<'a> XWindowProperty<'a> {
         }
     }
 
-    /// Converts this property into a vec
-    fn into_vec<T>(self) -> Result<Vec<T>, Box<dyn Error>> {
+    /// Writes this property into a vec
+    fn write_into_vec<T>(self, buf: &mut Vec<T>) -> Result<(), Box<dyn Error>> {
         self.check_format_compatible::<T>()?;
 
+        let prev_len = buf.len();
         let n_items = self.nitems as usize;
+        buf.reserve(n_items);
 
-        let mut prop = Vec::with_capacity(n_items);
         unsafe {
             // SAFETY: we trust Xlib that the source is aligned and valid,
-            // and `Vec::with_capacity` ensures that we have usable space to write them.
+            // and `buf.reserve` ensures that we have usable space to write them.
             ptr::copy_nonoverlapping(
-                self.prop.as_ptr().cast::<T>().cast_const(),
-                prop.as_mut_ptr(),
+                self.data.as_ptr().cast::<T>().cast_const(),
+                buf.as_mut_ptr().add(prev_len),
                 n_items,
             );
 
             // SAFETY: We created it with this much capacity earlier,
             // and the previous `copy` has initialized these elements.
-            prop.set_len(n_items);
+            buf.set_len(prev_len + n_items);
         }
 
+        Ok(())
+    }
+
+    /// Converts this property into a vec
+    fn into_vec<T>(self) -> Result<Vec<T>, Box<dyn Error>> {
+        let mut prop = Vec::new();
+        self.write_into_vec(&mut prop)?;
         Ok(prop)
     }
 }
@@ -135,7 +151,7 @@ impl<'a> Drop for XWindowProperty<'a> {
     fn drop(&mut self) {
         unsafe {
             // The data is free \o/
-            (self.x11.XFree)(self.prop.as_ptr());
+            (self.x11.XFree)(self.data.as_ptr());
         }
     }
 }
@@ -182,6 +198,7 @@ impl X11Clipboard {
                 text: intern_atom(&x, display, atom_names::TEXT),
                 utf8_string: intern_atom(&x, display, atom_names::UTF8_STRING),
                 targets: intern_atom(&x, display, atom_names::TARGETS),
+                incr: intern_atom(&x, display, atom_names::INCR),
             };
 
             Ok(Self {
@@ -214,7 +231,7 @@ impl X11Clipboard {
             self.display.as_ptr(),
             self.window,
             self.atoms.clipbox,
-            self.atoms.clipbox,
+            self.atoms.string,
             8,
             prop_mode::APPEND,
             std::ptr::null(),
@@ -285,22 +302,27 @@ impl X11Clipboard {
         let mut format: c_int = 8;
         let mut nitems: c_ulong = 0;
         let mut bytes_remaining: c_ulong = 0;
-        let mut prop: *mut c_void = std::ptr::null_mut();
+        let mut data: *mut c_void = std::ptr::null_mut();
 
         let status = unsafe {
+            let long_offset: c_long = 0;
+            let long_length: c_long = c_long::MAX;
+            let delete: Bool = 0;
+            let req_type: Atom = 0;
+
             (self.x.XGetWindowProperty)(
                 self.display.as_ptr(),
                 self.window,
                 self.atoms.clipbox,
-                0,
-                8192, // i64::MAX,
-                0,
-                0,
+                long_offset,
+                long_length,
+                delete,
+                req_type,
                 &mut ty,
                 &mut format,
                 &mut nitems,
                 &mut bytes_remaining,
-                &mut prop,
+                &mut data,
             )
         };
 
@@ -308,7 +330,7 @@ impl X11Clipboard {
             return Err(format!("Error: Couldn't get property! D: (code {})", status).into());
         }
 
-        let Some(prop) = NonNull::new(prop) else {
+        let Some(data) = NonNull::new(data) else {
             return Err("Wdym there's no data??".into());
         };
 
@@ -318,7 +340,7 @@ impl X11Clipboard {
             format,
             nitems,
             bytes_remaining,
-            prop,
+            data,
         })
     }
 
@@ -341,11 +363,56 @@ impl X11Clipboard {
             self.get_selection_event(atom_selection, atom_target)?
         };
 
-        // TODO: fetch property incrementally with INCR atom
         let clipbox_prop = self.get_clipbox_property()?;
-        dbg!(&clipbox_prop);
 
-        clipbox_prop.into_vec()
+        let type_name = unsafe { get_atom_name(&self.x, self.display, clipbox_prop.ty) };
+        dbg!(type_name, &clipbox_prop);
+
+        if clipbox_prop.ty == self.atoms.incr {
+            // We got an INCR atom, fetch property incrementally
+            eprintln!("Fetching property incrementally");
+            let mut data = Vec::new();
+
+            loop {
+                unsafe {
+                    // First delete the INCR property
+                    (self.x.XDeleteProperty)(
+                        self.display.as_ptr(),
+                        self.window,
+                        self.atoms.clipbox,
+                    );
+
+                    // Waiting for a `PropertyNotify` with the state argument `NewValue`
+                    loop {
+                        let xevent = self.next_event();
+
+                        if xevent.type_id == et::PROPERTY_NOTIFY {
+                            let xevent = xevent.xproperty;
+
+                            const NEW_VALUE: c_int = 0;
+                            if xevent.state == NEW_VALUE {
+                                let atom_name = get_atom_name(&self.x, self.display, xevent.atom);
+                                eprintln!("New value! (property {:?})", atom_name);
+                                break;
+                            }
+                        }
+                    }
+
+                    let clipbox_prop = self.get_clipbox_property()?;
+                    dbg!(&clipbox_prop);
+
+                    if clipbox_prop.nitems == 0 {
+                        break;
+                    }
+
+                    clipbox_prop.write_into_vec(&mut data)?;
+                }
+            }
+
+            Ok(data)
+        } else {
+            clipbox_prop.into_vec()
+        }
     }
 }
 

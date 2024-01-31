@@ -5,7 +5,6 @@ use std::fs;
 
 use crate::linux::x11::{atom_names, mime_types, X11Clipboard};
 
-
 /// The main fuckery.
 ///
 /// # Panics
