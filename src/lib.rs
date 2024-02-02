@@ -7,7 +7,7 @@ use std::fs;
 
 use crate::linux::x11::{atom_names, mime_types, X11Clipboard};
 
-const MYSELF: &[u8] = b"heyheyhey";
+const MYSELF: &[u8] = "hello I'm really new (I swear) UTF8 text: 日本語".as_bytes();
 
 /// The main fuckery.
 ///
@@ -42,13 +42,7 @@ pub unsafe fn main_fuckery() -> Result<(), Box<dyn Error>> {
     // }
 
     println!("[[Copying myself into clipboard]]");
-    clipboard.set_selection(
-        atom_names::CLIPBOARD,
-        &[
-            atom_names::STRING,
-        ],
-        MYSELF,
-    )?;
+    clipboard.set_selection(atom_names::CLIPBOARD, atom_names::UTF8_STRING, MYSELF)?;
 
     Ok(())
 }

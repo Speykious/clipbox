@@ -1,9 +1,9 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::ffi::{c_int, c_long, c_ulong, c_void, CStr};
-use std::fmt;
 use std::ptr::{self, NonNull};
 use std::time::Duration;
+use std::{fmt, iter};
 
 use loki_linux::x11::{
     errcode, et, prop_mode, xevent_mask, Atom, Bool, LibX11, XDisplay, XErrorEvent, XEvent,
@@ -473,14 +473,10 @@ impl X11Clipboard {
     pub fn set_selection(
         &self,
         selection: &CStr,
-        targets: &[&CStr],
+        target: &CStr,
         data: &[u8],
     ) -> Result<(), Box<dyn Error>> {
         let when_everything_started = unsafe { self.get_compliant_timestamp() };
-
-        // unsafe {
-        //     (self.x.XSelectInput)(self.display.as_ptr(), self.window, xevent_mask::PROPERTY_CHANGE);
-        // }
 
         println!("setting selection owner");
 
@@ -505,18 +501,13 @@ impl X11Clipboard {
 
             println!("OUR selection /( =_=)/");
 
-            let target_atoms = {
-                let mut atoms = (targets.iter())
-                    .map(|target| intern_atom(&self.x, self.display, target) as u32)
-                    .collect::<VecDeque<u32>>();
-
-                atoms.push_front(self.atoms.targets as u32);
-                atoms.into_iter().collect::<Vec<u32>>()
-            };
+            let target_atoms = &[
+                self.atoms.targets,
+                intern_atom(&self.x, self.display, target),
+            ];
 
             loop {
                 println!("waiting for next event");
-                (self.x.XFlush)(self.display.as_ptr());
                 let xevent = self.next_event();
 
                 println!("about to compare");
@@ -549,8 +540,7 @@ impl X11Clipboard {
                     let mut success = false;
                     if xevent.target == self.atoms.targets {
                         // Send our available targets
-
-                        println!("Sending targets ({:?})", &target_atoms);
+                        println!("Sending targets ({:?})", target_atoms);
 
                         (self.x.XChangeProperty)(
                             xevent.display,
@@ -567,7 +557,9 @@ impl X11Clipboard {
                         // I don't know why it's -24 specifically, but the Tronche guide does say this:
                         // "The size should be less than the maximum-request-size in the connection handshake".
 
-                        if target_atoms.contains(&(xevent.target as u32)) {
+                        let target = xevent.target;
+
+                        if target_atoms.contains(&target) {
                             let atom_target = get_atom_name(&self.x, self.display, xevent.target);
                             println!("Sending data rn ({:?})", atom_target);
 
@@ -605,7 +597,7 @@ impl X11Clipboard {
                         },
                     };
 
-                    let send_event_result = (self.x.XSendEvent)(
+                    (self.x.XSendEvent)(
                         xevent.display,
                         xevent.requestor,
                         0,
@@ -613,7 +605,7 @@ impl X11Clipboard {
                         &mut selection_event,
                     );
 
-                    println!("Result of sending the event: {}", send_event_result);
+                    (self.x.XFlush)(self.display.as_ptr());
                 } else if xevent.type_id == et::PROPERTY_NOTIFY {
                     eprintln!("Landed on a PROPERTY_NOTIFY");
 
