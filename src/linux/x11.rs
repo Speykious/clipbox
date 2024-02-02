@@ -553,7 +553,7 @@ impl X11Clipboard {
                         println!("Sending targets ({:?})", &target_atoms);
 
                         (self.x.XChangeProperty)(
-                            self.display.as_ptr(),
+                            xevent.display,
                             xevent.requestor,
                             property,
                             self.atoms.atom,
@@ -572,7 +572,7 @@ impl X11Clipboard {
                             println!("Sending data rn ({:?})", atom_target);
 
                             (self.x.XChangeProperty)(
-                                self.display.as_ptr(),
+                                xevent.display,
                                 xevent.requestor,
                                 property,
                                 xevent.target,
@@ -605,13 +605,15 @@ impl X11Clipboard {
                         },
                     };
 
-                    (self.x.XSendEvent)(
-                        self.display.as_ptr(),
+                    let send_event_result = (self.x.XSendEvent)(
+                        xevent.display,
                         xevent.requestor,
                         0,
                         0,
                         &mut selection_event,
                     );
+
+                    println!("Result of sending the event: {}", send_event_result);
                 } else if xevent.type_id == et::PROPERTY_NOTIFY {
                     eprintln!("Landed on a PROPERTY_NOTIFY");
 
