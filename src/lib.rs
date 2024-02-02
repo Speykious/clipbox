@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 mod linux;
 
 use std::error::Error;
@@ -5,7 +7,7 @@ use std::fs;
 
 use crate::linux::x11::{atom_names, mime_types, X11Clipboard};
 
-const MYSELF: &[u8] = include_bytes!("lib.rs");
+const MYSELF: &[u8] = b"heyheyhey";
 
 /// The main fuckery.
 ///
@@ -44,9 +46,6 @@ pub unsafe fn main_fuckery() -> Result<(), Box<dyn Error>> {
         atom_names::CLIPBOARD,
         &[
             atom_names::STRING,
-            atom_names::UTF8_STRING,
-            mime_types::TEXT_PLAIN,
-            mime_types::TEXT_PLAIN_CHARSET_UTF8,
         ],
         MYSELF,
     )?;

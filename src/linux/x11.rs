@@ -3,10 +3,11 @@ use std::error::Error;
 use std::ffi::{c_int, c_long, c_ulong, c_void, CStr};
 use std::fmt;
 use std::ptr::{self, NonNull};
+use std::time::Duration;
 
 use loki_linux::x11::{
-    errcode, et, prop_mode, xevent_mask, Atom, Bool, LibX11, XDisplay, XEvent, XSelectionEvent,
-    XWindow,
+    errcode, et, prop_mode, xevent_mask, Atom, Bool, LibX11, XDisplay, XErrorEvent, XEvent,
+    XSelectionEvent, XWindow,
 };
 
 /// Just a boilerplate function to construct a const `&CStr`.
@@ -45,6 +46,8 @@ pub mod atom_names {
     pub const TARGETS: &CStr = const_cstr(b"TARGETS\0");
     /// Property type: incremental data fetching
     pub const INCR: &CStr = const_cstr(b"INCR\0");
+    /// Property type: atom
+    pub const ATOM: &CStr = const_cstr(b"ATOM\0");
 }
 
 /// Some commonly used mime types. They're literally infinite so the list cannot be exclusive.
@@ -88,6 +91,8 @@ pub struct Atoms {
     pub targets: Atom,
     /// Property type: incremental data fetching
     pub incr: Atom,
+    /// Property type: atom
+    pub atom: Atom,
 }
 
 unsafe fn intern_atom(x: &LibX11, display: NonNull<XDisplay>, name: &CStr) -> Atom {
@@ -177,6 +182,16 @@ impl<'a> fmt::Debug for XWindowProperty<'a> {
     }
 }
 
+unsafe extern "C" fn x11_error_handler(_display: *mut XDisplay, event: *mut XErrorEvent) -> i32 {
+    if let Some(event) = event.as_ref() {
+        println!("X11: error (code {})", event.error_code);
+    } else {
+        println!("X11 called the error handler without an error event or a display, somehow");
+    }
+
+    0
+}
+
 pub struct X11Clipboard {
     x: LibX11,
     display: NonNull<XDisplay>,
@@ -189,6 +204,8 @@ impl X11Clipboard {
     pub fn init() -> Result<Self, Box<dyn Error>> {
         unsafe {
             let x = LibX11::new()?;
+
+            (x.XSetErrorHandler)(Some(x11_error_handler));
 
             // Open the default X11 display
             let display = (x.XOpenDisplay)(std::ptr::null());
@@ -213,6 +230,7 @@ impl X11Clipboard {
                 utf8_string: intern_atom(&x, display, atom_names::UTF8_STRING),
                 targets: intern_atom(&x, display, atom_names::TARGETS),
                 incr: intern_atom(&x, display, atom_names::INCR),
+                atom: intern_atom(&x, display, atom_names::ATOM),
             };
 
             let max_request_size = (x.XMaxRequestSize)(display.as_ptr()) as usize;
@@ -460,10 +478,15 @@ impl X11Clipboard {
     ) -> Result<(), Box<dyn Error>> {
         let when_everything_started = unsafe { self.get_compliant_timestamp() };
 
+        // unsafe {
+        //     (self.x.XSelectInput)(self.display.as_ptr(), self.window, xevent_mask::PROPERTY_CHANGE);
+        // }
+
         println!("setting selection owner");
 
         unsafe {
             let atom_selection = intern_atom(&self.x, self.display, selection);
+            dbg!(atom_selection, &self.atoms);
 
             // Become owner of selection
             (self.x.XSetSelectionOwner)(
@@ -492,10 +515,28 @@ impl X11Clipboard {
             };
 
             loop {
+                println!("waiting for next event");
+                (self.x.XFlush)(self.display.as_ptr());
                 let xevent = self.next_event();
 
+                println!("about to compare");
                 if xevent.type_id == et::SELECTION_REQUEST {
                     let xevent = xevent.xselectionrequest;
+
+                    if xevent.owner != self.window {
+                        println!("we don't own that event");
+                        continue;
+                    }
+
+                    if xevent.selection != atom_selection {
+                        println!("we don't manage that selection");
+                        continue;
+                    }
+
+                    let atom_sel = get_atom_name(&self.x, self.display, xevent.selection);
+                    let atom_target = get_atom_name(&self.x, self.display, xevent.target);
+                    let atom_prop = get_atom_name(&self.x, self.display, xevent.property);
+                    dbg!(atom_sel, atom_target, atom_prop);
 
                     // "If the specified property is None, the requestor is an obsolete client.
                     // Owners are encouraged to support these clients by using the specified target
@@ -505,17 +546,17 @@ impl X11Clipboard {
                         _ => xevent.property,
                     };
 
+                    let mut success = false;
                     if xevent.target == self.atoms.targets {
                         // Send our available targets
 
-                        println!("Sending targets");
-                        dbg!(&target_atoms);
+                        println!("Sending targets ({:?})", &target_atoms);
 
                         (self.x.XChangeProperty)(
                             self.display.as_ptr(),
-                            xevent.owner,
+                            xevent.requestor,
                             property,
-                            self.atoms.targets,
+                            self.atoms.atom,
                             32,
                             prop_mode::REPLACE,
                             target_atoms.as_ptr().cast(),
@@ -526,11 +567,13 @@ impl X11Clipboard {
                         // I don't know why it's -24 specifically, but the Tronche guide does say this:
                         // "The size should be less than the maximum-request-size in the connection handshake".
 
-                        if !target_atoms.contains(&(xevent.target as u32)) {
-                            println!("Sending data rn");
+                        if target_atoms.contains(&(xevent.target as u32)) {
+                            let atom_target = get_atom_name(&self.x, self.display, xevent.target);
+                            println!("Sending data rn ({:?})", atom_target);
+
                             (self.x.XChangeProperty)(
                                 self.display.as_ptr(),
-                                xevent.owner,
+                                xevent.requestor,
                                 property,
                                 xevent.target,
                                 8,
@@ -540,7 +583,8 @@ impl X11Clipboard {
                             );
                         } else {
                             // Refuse conversion
-                            println!("Refusing data rn");
+                            let atom_target = get_atom_name(&self.x, self.display, xevent.target);
+                            println!("Refusing data rn ({:?})", atom_target);
                             property = 0;
                         }
                     } else {
@@ -563,16 +607,22 @@ impl X11Clipboard {
 
                     (self.x.XSendEvent)(
                         self.display.as_ptr(),
-                        self.window,
+                        xevent.requestor,
                         0,
                         0,
                         &mut selection_event,
                     );
-
-                    (self.x.XFlush)(self.display.as_ptr());
                 } else if xevent.type_id == et::PROPERTY_NOTIFY {
                     eprintln!("Landed on a PROPERTY_NOTIFY");
-                    (self.x.XFlush)(self.display.as_ptr());
+
+                    let xevent = xevent.xproperty;
+                    if xevent.state == 1 {
+                        eprintln!("it's delete");
+                    } else if xevent.state == 0 {
+                        eprintln!("it's newvalue");
+                    } else {
+                        eprintln!("it's something else?? {}", xevent.state);
+                    }
                 } else if xevent.type_id == et::SELECTION_CLEAR {
                     println!("No longer our selection \\(=_= )\\");
                     return Ok(());
