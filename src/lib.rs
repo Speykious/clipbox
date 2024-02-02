@@ -5,6 +5,8 @@ use std::fs;
 
 use crate::linux::x11::{atom_names, mime_types, X11Clipboard};
 
+const MYSELF: &[u8] = include_bytes!("lib.rs");
+
 /// The main fuckery.
 ///
 /// # Panics
@@ -22,20 +24,32 @@ pub unsafe fn main_fuckery() -> Result<(), Box<dyn Error>> {
     println!("[[Init X11 clipboard]]");
     let clipboard = X11Clipboard::init()?;
 
-    println!("[[Getting targets]]");
-    let targets = clipboard.get_targets(atom_names::CLIPBOARD)?;
-    dbg!(&targets);
+    // println!("[[Getting targets]]");
+    // let targets = clipboard.get_targets(atom_names::CLIPBOARD)?;
+    // dbg!(&targets);
 
-    println!("[[Getting selection]]");
-    if targets.contains(&mime_types::IMAGE_PNG) {
-        let selection = clipboard.get_selection(atom_names::CLIPBOARD, mime_types::IMAGE_PNG)?;
-        println!("[[Writing image]]");
-        fs::write("image.png", selection)?;
-    } else {
-        let selection = clipboard.get_selection(atom_names::CLIPBOARD, atom_names::STRING)?;
-        println!("[[Writing text]]");
-        fs::write("string.txt", selection)?;
-    }
+    // println!("[[Getting selection]]");
+    // if targets.contains(&mime_types::IMAGE_PNG) {
+    //     let selection = clipboard.get_selection(atom_names::CLIPBOARD, mime_types::IMAGE_PNG)?;
+    //     println!("[[Writing image]]");
+    //     fs::write("image.png", selection)?;
+    // } else {
+    //     let selection = clipboard.get_selection(atom_names::CLIPBOARD, atom_names::STRING)?;
+    //     println!("[[Writing text]]");
+    //     fs::write("string.txt", selection)?;
+    // }
+
+    println!("[[Copying myself into clipboard]]");
+    clipboard.set_selection(
+        atom_names::CLIPBOARD,
+        &[
+            atom_names::STRING,
+            atom_names::UTF8_STRING,
+            mime_types::TEXT_PLAIN,
+            mime_types::TEXT_PLAIN_CHARSET_UTF8,
+        ],
+        MYSELF,
+    )?;
 
     Ok(())
 }

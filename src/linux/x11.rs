@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::error::Error;
 use std::ffi::{c_int, c_long, c_ulong, c_void, CStr};
 use std::fmt;
@@ -85,7 +86,6 @@ pub struct Atoms {
 
     /// Property type: targets (list of atoms)
     pub targets: Atom,
-
     /// Property type: incremental data fetching
     pub incr: Atom,
 }
@@ -182,6 +182,7 @@ pub struct X11Clipboard {
     display: NonNull<XDisplay>,
     window: XWindow,
     atoms: Atoms,
+    max_request_size: usize,
 }
 
 impl X11Clipboard {
@@ -214,11 +215,14 @@ impl X11Clipboard {
                 incr: intern_atom(&x, display, atom_names::INCR),
             };
 
+            let max_request_size = (x.XMaxRequestSize)(display.as_ptr()) as usize;
+
             Ok(Self {
                 x,
                 display,
                 window,
                 atoms,
+                max_request_size,
             })
         }
     }
@@ -230,6 +234,16 @@ impl X11Clipboard {
     }
 
     /// Get a compliant timestamp for selection requests
+    ///
+    /// # Convention
+    ///
+    /// *Clients attempting to acquire a selection must set the time value of the
+    /// `SetSelectionOwner` request to the timestamp of the event triggering the
+    /// acquisition attempt, not to `CurrentTime`. A zero-length append to a property
+    /// is a way to obtain a timestamp for this purpose; the timestamp is in the
+    /// corresponding `PropertyNotify` event.*
+    ///
+    /// [ICCCM - Acquiring Selection Ownership](https://tronche.com/gui/x/icccm/sec-2.html#s-2.1)
     unsafe fn get_compliant_timestamp(&self) -> c_ulong {
         // Send dummy change property request to obtain a timestamp from its resulting event
         // This is because it is disincentivized to use CurrentTime when sending a ConvertSelection request
@@ -256,7 +270,10 @@ impl X11Clipboard {
             }
         }
     }
+}
 
+// Paste (get selection)
+impl X11Clipboard {
     unsafe fn get_selection_event(
         &self,
         atom_selection: Atom,
@@ -429,6 +446,138 @@ impl X11Clipboard {
             Ok(data)
         } else {
             clipbox_prop.into_vec()
+        }
+    }
+}
+
+// Copy (set selection)
+impl X11Clipboard {
+    pub fn set_selection(
+        &self,
+        selection: &CStr,
+        targets: &[&CStr],
+        data: &[u8],
+    ) -> Result<(), Box<dyn Error>> {
+        let when_everything_started = unsafe { self.get_compliant_timestamp() };
+
+        println!("setting selection owner");
+
+        unsafe {
+            let atom_selection = intern_atom(&self.x, self.display, selection);
+
+            // Become owner of selection
+            (self.x.XSetSelectionOwner)(
+                self.display.as_ptr(),
+                atom_selection,
+                self.window,
+                when_everything_started,
+            );
+
+            // Verify that we did indeed become owner of selection
+            let owner = (self.x.XGetSelectionOwner)(self.display.as_ptr(), atom_selection);
+            if owner != self.window {
+                // \(T-T)/
+                return Err("You will own nothing, and you will be happy >:3c".into());
+            }
+
+            println!("OUR selection /( =_=)/");
+
+            let target_atoms = {
+                let mut atoms = (targets.iter())
+                    .map(|target| intern_atom(&self.x, self.display, target) as u32)
+                    .collect::<VecDeque<u32>>();
+
+                atoms.push_front(self.atoms.targets as u32);
+                atoms.into_iter().collect::<Vec<u32>>()
+            };
+
+            loop {
+                let xevent = self.next_event();
+
+                if xevent.type_id == et::SELECTION_REQUEST {
+                    let xevent = xevent.xselectionrequest;
+
+                    // "If the specified property is None, the requestor is an obsolete client.
+                    // Owners are encouraged to support these clients by using the specified target
+                    // atom as the property name to be used for the reply."
+                    let mut property = match xevent.property {
+                        0 => xevent.target,
+                        _ => xevent.property,
+                    };
+
+                    if xevent.target == self.atoms.targets {
+                        // Send our available targets
+
+                        println!("Sending targets");
+                        dbg!(&target_atoms);
+
+                        (self.x.XChangeProperty)(
+                            self.display.as_ptr(),
+                            xevent.owner,
+                            property,
+                            self.atoms.targets,
+                            32,
+                            prop_mode::REPLACE,
+                            target_atoms.as_ptr().cast(),
+                            target_atoms.len() as i32,
+                        );
+                    } else if data.len() < self.max_request_size - 24 {
+                        // ^ Taken from this line: https://github.com/quininer/x11-clipboard/blob/704cfd3ebf7297e4cd3b5ef00d2e2527e9b633f2/src/run.rs#L122
+                        // I don't know why it's -24 specifically, but the Tronche guide does say this:
+                        // "The size should be less than the maximum-request-size in the connection handshake".
+
+                        if !target_atoms.contains(&(xevent.target as u32)) {
+                            println!("Sending data rn");
+                            (self.x.XChangeProperty)(
+                                self.display.as_ptr(),
+                                xevent.owner,
+                                property,
+                                xevent.target,
+                                8,
+                                prop_mode::REPLACE,
+                                data.as_ptr().cast(),
+                                data.len() as i32,
+                            );
+                        } else {
+                            // Refuse conversion
+                            println!("Refusing data rn");
+                            property = 0;
+                        }
+                    } else {
+                        return Err("Your data is so big 7_7'".into());
+                    }
+
+                    let mut selection_event = XEvent {
+                        xselection: XSelectionEvent {
+                            type_id: et::SELECTION_NOTIFY,
+                            serial: 0,
+                            send_event: 1,
+                            display: xevent.display,
+                            requestor: xevent.requestor,
+                            selection: xevent.selection,
+                            target: xevent.target,
+                            property,
+                            time: xevent.time,
+                        },
+                    };
+
+                    (self.x.XSendEvent)(
+                        self.display.as_ptr(),
+                        self.window,
+                        0,
+                        0,
+                        &mut selection_event,
+                    );
+
+                    (self.x.XFlush)(self.display.as_ptr());
+                } else if xevent.type_id == et::PROPERTY_NOTIFY {
+                    eprintln!("Landed on a PROPERTY_NOTIFY");
+                    (self.x.XFlush)(self.display.as_ptr());
+                } else if xevent.type_id == et::SELECTION_CLEAR {
+                    println!("No longer our selection \\(=_= )\\");
+                    return Ok(());
+                }
+            }
         }
     }
 }
