@@ -44,5 +44,8 @@ pub unsafe fn main_fuckery() -> Result<(), Box<dyn Error>> {
     println!("[[Copying myself into clipboard]]");
     clipboard.set_selection(atom_names::CLIPBOARD, atom_names::UTF8_STRING, MYSELF)?;
 
+    // println!("[[Copying image into clipboard]]");
+    // clipboard.set_selection(atom_names::CLIPBOARD, mime_types::IMAGE_PNG, IMAGE)?;
+
     Ok(())
 }

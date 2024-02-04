@@ -2,12 +2,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::ffi::{c_int, c_long, c_ulong, c_void, CStr};
 use std::ptr::{self, NonNull};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fmt, iter};
 
 use loki_linux::x11::{
     errcode, et, prop_mode, xevent_mask, Atom, Bool, LibX11, XDisplay, XErrorEvent, XEvent,
-    XSelectionEvent, XWindow,
+    XSelectionEvent, XSelectionRequestEvent, XWindow,
 };
 
 /// Just a boilerplate function to construct a const `&CStr`.
@@ -249,6 +249,35 @@ impl X11Clipboard {
         let mut xevent = XEvent { type_id: 0 };
         (self.x.XNextEvent)(self.display.as_ptr(), &mut xevent);
         xevent
+    }
+
+    /// Tries to get the next event before the timeout.
+    /// It will look for pending events every 100µs.
+    unsafe fn next_event_timeout(&self, timeout: Duration) -> Option<XEvent> {
+        let start = Instant::now();
+        loop {
+            let pending = (self.x.XPending)(self.display.as_ptr());
+
+            if pending == 0 {
+                let elapsed = start.elapsed();
+                if elapsed > timeout {
+                    return None;
+                }
+
+                print!(
+                    "\x1b[2K\rWaiting for next event... {}µs",
+                    elapsed.as_micros()
+                );
+
+                std::thread::sleep(Duration::from_micros(100));
+                continue;
+            }
+
+            println!("\nPending: {}", pending);
+            break;
+        }
+
+        Some(self.next_event())
     }
 
     /// Get a compliant timestamp for selection requests
@@ -506,21 +535,31 @@ impl X11Clipboard {
                 intern_atom(&self.x, self.display, target),
             ];
 
+            const INCR_CHUNK_SIZE: usize = 4096;
+            let mut incr_bytes_sent: usize = 0;
+            let mut incr_start_xevent: Option<XSelectionRequestEvent> = None;
             loop {
-                println!("waiting for next event");
-                let xevent = self.next_event();
+                let Some(xevent) = self.next_event_timeout(Duration::from_millis(100)) else {
+                    // we're not receiving any event immediately, consider the operation finished
+                    return Ok(());
+                };
 
-                println!("about to compare");
                 if xevent.type_id == et::SELECTION_REQUEST {
-                    let xevent = xevent.xselectionrequest;
+                    let mut xevent = xevent.xselectionrequest;
+
+                    // "If the specified property is None, the requestor is an obsolete client.
+                    // Owners are encouraged to support these clients by using the specified target
+                    // atom as the property name to be used for the reply."
+                    xevent.property = match xevent.property {
+                        0 => xevent.target,
+                        _ => xevent.property,
+                    };
 
                     if xevent.owner != self.window {
-                        println!("we don't own that event");
                         continue;
                     }
 
                     if xevent.selection != atom_selection {
-                        println!("we don't manage that selection");
                         continue;
                     }
 
@@ -529,44 +568,33 @@ impl X11Clipboard {
                     let atom_prop = get_atom_name(&self.x, self.display, xevent.property);
                     dbg!(atom_sel, atom_target, atom_prop);
 
-                    // "If the specified property is None, the requestor is an obsolete client.
-                    // Owners are encouraged to support these clients by using the specified target
-                    // atom as the property name to be used for the reply."
-                    let mut property = match xevent.property {
-                        0 => xevent.target,
-                        _ => xevent.property,
-                    };
+                    if target_atoms.contains(&xevent.target) {
+                        if xevent.target == self.atoms.targets {
+                            // Send our available targets
+                            println!("Sending targets ({:?})", target_atoms);
 
-                    let mut success = false;
-                    if xevent.target == self.atoms.targets {
-                        // Send our available targets
-                        println!("Sending targets ({:?})", target_atoms);
+                            (self.x.XChangeProperty)(
+                                xevent.display,
+                                xevent.requestor,
+                                xevent.property,
+                                self.atoms.atom,
+                                32,
+                                prop_mode::REPLACE,
+                                target_atoms.as_ptr().cast(),
+                                target_atoms.len() as i32,
+                            );
+                        } else if data.len() < self.max_request_size - 24 {
+                            // ^ Taken from this line: https://github.com/quininer/x11-clipboard/blob/704cfd3ebf7297e4cd3b5ef00d2e2527e9b633f2/src/run.rs#L122
+                            // I don't know why it's -24 specifically, but the Tronche guide does say this:
+                            // "The size should be less than the maximum-request-size in the connection handshake".
 
-                        (self.x.XChangeProperty)(
-                            xevent.display,
-                            xevent.requestor,
-                            property,
-                            self.atoms.atom,
-                            32,
-                            prop_mode::REPLACE,
-                            target_atoms.as_ptr().cast(),
-                            target_atoms.len() as i32,
-                        );
-                    } else if data.len() < self.max_request_size - 24 {
-                        // ^ Taken from this line: https://github.com/quininer/x11-clipboard/blob/704cfd3ebf7297e4cd3b5ef00d2e2527e9b633f2/src/run.rs#L122
-                        // I don't know why it's -24 specifically, but the Tronche guide does say this:
-                        // "The size should be less than the maximum-request-size in the connection handshake".
-
-                        let target = xevent.target;
-
-                        if target_atoms.contains(&target) {
                             let atom_target = get_atom_name(&self.x, self.display, xevent.target);
                             println!("Sending data rn ({:?})", atom_target);
 
                             (self.x.XChangeProperty)(
                                 xevent.display,
                                 xevent.requestor,
-                                property,
+                                xevent.property,
                                 xevent.target,
                                 8,
                                 prop_mode::REPLACE,
@@ -574,13 +602,34 @@ impl X11Clipboard {
                                 data.len() as i32,
                             );
                         } else {
-                            // Refuse conversion
-                            let atom_target = get_atom_name(&self.x, self.display, xevent.target);
-                            println!("Refusing data rn ({:?})", atom_target);
-                            property = 0;
+                            println!("Sending data incrementally ({} > {} bytes)", data.len(), self.max_request_size - 24);
+
+                            // change the attributes of the requestor window against its will (wtf)
+                            (self.x.XSelectInput)(
+                                xevent.display,
+                                xevent.requestor,
+                                xevent_mask::PROPERTY_CHANGE,
+                            );
+
+                            // send data incrementally
+                            (self.x.XChangeProperty)(
+                                xevent.display,
+                                xevent.requestor,
+                                xevent.property,
+                                self.atoms.incr,
+                                32,
+                                prop_mode::REPLACE,
+                                std::ptr::null(),
+                                0,
+                            );
+
+                            incr_start_xevent = Some(xevent);
                         }
                     } else {
-                        return Err("Your data is so big 7_7'".into());
+                        // Refuse conversion
+                        let atom_target = get_atom_name(&self.x, self.display, xevent.target);
+                        println!("Refusing data rn ({:?})", atom_target);
+                        xevent.property = 0;
                     }
 
                     let mut selection_event = XEvent {
@@ -592,7 +641,7 @@ impl X11Clipboard {
                             requestor: xevent.requestor,
                             selection: xevent.selection,
                             target: xevent.target,
-                            property,
+                            property: xevent.property,
                             time: xevent.time,
                         },
                     };
@@ -611,12 +660,38 @@ impl X11Clipboard {
 
                     let xevent = xevent.xproperty;
                     if xevent.state == 1 {
-                        eprintln!("it's delete");
-                    } else if xevent.state == 0 {
-                        eprintln!("it's newvalue");
+                        eprintln!("PROPERTY_NOTIFY: Delete - send data incrementally");
                     } else {
-                        eprintln!("it's something else?? {}", xevent.state);
+                        eprintln!("PROPERTY_NOTIFY: NewValue - move on");
+                        continue;
                     }
+
+                    let Some(xevent) = incr_start_xevent else {
+                        eprintln!("there's no incremental data to send");
+                        continue;
+                    };
+
+                    let incr_data_slice = {
+                        let end = (incr_bytes_sent + INCR_CHUNK_SIZE).min(data.len());
+                        &data[incr_bytes_sent..end]
+                    };
+
+                    if incr_data_slice.is_empty() {
+                        incr_start_xevent = None;
+                    }
+
+                    (self.x.XChangeProperty)(
+                        xevent.display,
+                        xevent.requestor,
+                        xevent.property,
+                        xevent.target,
+                        8,
+                        prop_mode::REPLACE,
+                        incr_data_slice.as_ptr().cast(),
+                        incr_data_slice.len() as i32,
+                    );
+
+                    incr_bytes_sent += incr_data_slice.len();
                 } else if xevent.type_id == et::SELECTION_CLEAR {
                     println!("No longer our selection \\(=_= )\\");
                     return Ok(());
