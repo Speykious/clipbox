@@ -273,7 +273,7 @@ impl X11Clipboard {
                 continue;
             }
 
-            println!("\nPending: {}", pending);
+            println!("\x1b[2K\rPending: {}", pending);
             break;
         }
 
@@ -507,11 +507,8 @@ impl X11Clipboard {
     ) -> Result<(), Box<dyn Error>> {
         let when_everything_started = unsafe { self.get_compliant_timestamp() };
 
-        println!("setting selection owner");
-
         unsafe {
             let atom_selection = intern_atom(&self.x, self.display, selection);
-            dbg!(atom_selection, &self.atoms);
 
             // Become owner of selection
             (self.x.XSetSelectionOwner)(
@@ -527,8 +524,6 @@ impl X11Clipboard {
                 // \(T-T)/
                 return Err("You will own nothing, and you will be happy >:3c".into());
             }
-
-            println!("OUR selection /( =_=)/");
 
             let target_atoms = &[
                 self.atoms.targets,
@@ -566,13 +561,10 @@ impl X11Clipboard {
                     let atom_sel = get_atom_name(&self.x, self.display, xevent.selection);
                     let atom_target = get_atom_name(&self.x, self.display, xevent.target);
                     let atom_prop = get_atom_name(&self.x, self.display, xevent.property);
-                    dbg!(atom_sel, atom_target, atom_prop);
 
                     if target_atoms.contains(&xevent.target) {
                         if xevent.target == self.atoms.targets {
                             // Send our available targets
-                            println!("Sending targets ({:?})", target_atoms);
-
                             (self.x.XChangeProperty)(
                                 xevent.display,
                                 xevent.requestor,
@@ -588,9 +580,6 @@ impl X11Clipboard {
                             // I don't know why it's -24 specifically, but the Tronche guide does say this:
                             // "The size should be less than the maximum-request-size in the connection handshake".
 
-                            let atom_target = get_atom_name(&self.x, self.display, xevent.target);
-                            println!("Sending data rn ({:?})", atom_target);
-
                             (self.x.XChangeProperty)(
                                 xevent.display,
                                 xevent.requestor,
@@ -602,8 +591,6 @@ impl X11Clipboard {
                                 data.len() as i32,
                             );
                         } else {
-                            println!("Sending data incrementally ({} > {} bytes)", data.len(), self.max_request_size - 24);
-
                             // change the attributes of the requestor window against its will (wtf)
                             (self.x.XSelectInput)(
                                 xevent.display,
@@ -627,8 +614,6 @@ impl X11Clipboard {
                         }
                     } else {
                         // Refuse conversion
-                        let atom_target = get_atom_name(&self.x, self.display, xevent.target);
-                        println!("Refusing data rn ({:?})", atom_target);
                         xevent.property = 0;
                     }
 
@@ -656,18 +641,14 @@ impl X11Clipboard {
 
                     (self.x.XFlush)(self.display.as_ptr());
                 } else if xevent.type_id == et::PROPERTY_NOTIFY {
-                    eprintln!("Landed on a PROPERTY_NOTIFY");
-
                     let xevent = xevent.xproperty;
-                    if xevent.state == 1 {
-                        eprintln!("PROPERTY_NOTIFY: Delete - send data incrementally");
-                    } else {
-                        eprintln!("PROPERTY_NOTIFY: NewValue - move on");
+                    if xevent.state != 1 {
+                        // Not a Delete - move on
                         continue;
                     }
 
                     let Some(xevent) = incr_start_xevent else {
-                        eprintln!("there's no incremental data to send");
+                        // there's no incremental data to send
                         continue;
                     };
 
@@ -693,7 +674,7 @@ impl X11Clipboard {
 
                     incr_bytes_sent += incr_data_slice.len();
                 } else if xevent.type_id == et::SELECTION_CLEAR {
-                    println!("No longer our selection \\(=_= )\\");
+                    // No longer our selection \(=_= )\
                     return Ok(());
                 }
             }
