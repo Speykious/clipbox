@@ -1,9 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::ffi::{c_int, c_long, c_ulong, c_void, CStr};
+use std::fmt;
 use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
-use std::{fmt, iter};
 
 use loki_linux::x11::{
     errcode, et, prop_mode, xevent_mask, Atom, Bool, LibX11, XDisplay, XErrorEvent, XEvent,
@@ -103,6 +102,24 @@ unsafe fn get_atom_name(x: &LibX11, display: NonNull<XDisplay>, atom: Atom) -> &
     CStr::from_ptr((x.XGetAtomName)(display.as_ptr(), atom))
 }
 
+#[derive(Debug)]
+pub struct PropertyInvalidFormatError {
+    pub wanted: u8,
+    pub actual: u8,
+}
+
+impl Error for PropertyInvalidFormatError {}
+
+impl fmt::Display for PropertyInvalidFormatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Invalid format: property is {} bits, but type wanted is {} bits",
+            self.actual, self.wanted
+        )
+    }
+}
+
 struct XWindowProperty<'a> {
     // This is here to make sure we free the prop when dropping
     x11: &'a LibX11,
@@ -116,20 +133,19 @@ struct XWindowProperty<'a> {
 
 impl<'a> XWindowProperty<'a> {
     /// Checks that the format size is compatible with the size of `T`
-    fn check_format_compatible<T>(&self) -> Result<(), Box<dyn Error>> {
+    fn check_format_compatible<T>(&self) -> Result<(), PropertyInvalidFormatError> {
         let t_format: usize = 8 * std::mem::size_of::<T>();
         match self.format as usize == t_format {
             true => Ok(()),
-            false => Err(format!(
-                "Invalid format ({} bits instead of {}).",
-                self.format, t_format
-            )
-            .into()),
+            false => Err(PropertyInvalidFormatError {
+                wanted: t_format as u8,
+                actual: self.format as u8,
+            }),
         }
     }
 
     /// Writes this property into a vec
-    fn write_into_vec<T>(self, buf: &mut Vec<T>) -> Result<(), Box<dyn Error>> {
+    fn write_into_vec<T>(self, buf: &mut Vec<T>) -> Result<(), PropertyInvalidFormatError> {
         self.check_format_compatible::<T>()?;
 
         let prev_len = buf.len();
@@ -154,7 +170,7 @@ impl<'a> XWindowProperty<'a> {
     }
 
     /// Converts this property into a vec
-    fn into_vec<T>(self) -> Result<Vec<T>, Box<dyn Error>> {
+    fn into_vec<T>(self) -> Result<Vec<T>, PropertyInvalidFormatError> {
         let mut prop = Vec::new();
         self.write_into_vec(&mut prop)?;
         Ok(prop)
@@ -319,13 +335,49 @@ impl X11Clipboard {
     }
 }
 
+#[derive(Debug)]
+pub enum GetSelectionError {
+    BadSelection,
+    SelectionLost,
+    GetPropertyFailed(i32),
+    NoDataInProperty,
+    PropertyInvalidFormat(PropertyInvalidFormatError),
+}
+
+impl Error for GetSelectionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::PropertyInvalidFormat(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for GetSelectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadSelection => write!(f, "Received notification for a selection that wasn't requested. The X server is probably mad"),
+            Self::SelectionLost => write!(f, "Selection lost (probably a bug with the clipbox library, how did that happen?)"),
+            Self::GetPropertyFailed(status) => write!(f, "Couldn't get property (error code: {})", status),
+            Self::NoDataInProperty => write!(f, "No data in our dedicated X11 property (how even)"),
+            Self::PropertyInvalidFormat(err) => err.fmt(f),
+        }
+    }
+}
+
+impl From<PropertyInvalidFormatError> for GetSelectionError {
+    fn from(value: PropertyInvalidFormatError) -> Self {
+        Self::PropertyInvalidFormat(value)
+    }
+}
+
 // Paste (get selection)
 impl X11Clipboard {
     unsafe fn get_selection_event(
         &self,
         atom_selection: Atom,
         atom_target: Atom,
-    ) -> Result<XSelectionEvent, Box<dyn Error>> {
+    ) -> Result<XSelectionEvent, GetSelectionError> {
         let when_everything_started = self.get_compliant_timestamp();
 
         // Send a ConvertSelection request
@@ -350,24 +402,19 @@ impl X11Clipboard {
                 {
                     break xevent;
                 } else {
-                    return Err("(why are we getting a selection that's not ours??)".into());
+                    return Err(GetSelectionError::BadSelection);
                 }
             }
         };
 
         if xevent.property == 0 {
-            return Err("HOUSTON WE LOST THE SELECTION D:".into());
-        }
-
-        if xevent.property != self.atoms.clipbox {
-            let property = get_atom_name(&self.x, self.display, xevent.property);
-            return Err(format!("We got {:?} instead of \"CLIPBOX\"", property).into());
+            return Err(GetSelectionError::SelectionLost);
         }
 
         Ok(xevent)
     }
 
-    fn get_clipbox_property(&self) -> Result<XWindowProperty, Box<dyn Error>> {
+    fn get_clipbox_property(&self) -> Result<XWindowProperty, GetSelectionError> {
         let mut ty: Atom = 0;
         let mut format: c_int = 8;
         let mut nitems: c_ulong = 0;
@@ -397,11 +444,11 @@ impl X11Clipboard {
         };
 
         if status != errcode::SUCCESS {
-            return Err(format!("Error: Couldn't get property! D: (code {})", status).into());
+            return Err(GetSelectionError::GetPropertyFailed(status));
         }
 
         let Some(data) = NonNull::new(data) else {
-            return Err("Wdym there's no data??".into());
+            return Err(GetSelectionError::NoDataInProperty);
         };
 
         Ok(XWindowProperty {
@@ -414,7 +461,7 @@ impl X11Clipboard {
         })
     }
 
-    pub fn get_targets(&self, selection: &CStr) -> Result<Vec<&CStr>, Box<dyn Error>> {
+    pub fn get_targets(&self, selection: &CStr) -> Result<Vec<&CStr>, GetSelectionError> {
         unsafe {
             let atom_selection = intern_atom(&self.x, self.display, selection);
             self.get_selection_event(atom_selection, self.atoms.targets)?
@@ -436,13 +483,12 @@ impl X11Clipboard {
         &self,
         selection: &CStr,
         target: &CStr,
-    ) -> Result<Vec<u8>, Box<dyn Error>> {
+    ) -> Result<Vec<u8>, GetSelectionError> {
         if target == atom_names::TARGETS {
-            let emsg = concat!(
+            panic!(concat!(
                 "TARGETS is a special selection target, this method doesn't support it.",
-                "Try `X11Clipboard::get_targets` instead!"
-            );
-            return Err(emsg.into());
+                " Try X11Clipboard::get_targets instead!"
+            ));
         }
 
         unsafe {
@@ -492,7 +538,22 @@ impl X11Clipboard {
 
             Ok(data)
         } else {
-            clipbox_prop.into_vec()
+            Ok(clipbox_prop.into_vec()?)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum SetSelectionError {
+    NotOwner,
+}
+
+impl Error for SetSelectionError {}
+
+impl fmt::Display for SetSelectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotOwner => write!(f, "Could not become the selection owner"),
         }
     }
 }
@@ -504,7 +565,7 @@ impl X11Clipboard {
         selection: &CStr,
         target: &CStr,
         data: &[u8],
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), SetSelectionError> {
         let when_everything_started = unsafe { self.get_compliant_timestamp() };
 
         unsafe {
@@ -522,7 +583,7 @@ impl X11Clipboard {
             let owner = (self.x.XGetSelectionOwner)(self.display.as_ptr(), atom_selection);
             if owner != self.window {
                 // \(T-T)/
-                return Err("You will own nothing, and you will be happy >:3c".into());
+                return Err(SetSelectionError::NotOwner);
             }
 
             let target_atoms = &[
@@ -557,10 +618,6 @@ impl X11Clipboard {
                     if xevent.selection != atom_selection {
                         continue;
                     }
-
-                    let atom_sel = get_atom_name(&self.x, self.display, xevent.selection);
-                    let atom_target = get_atom_name(&self.x, self.display, xevent.target);
-                    let atom_prop = get_atom_name(&self.x, self.display, xevent.property);
 
                     if target_atoms.contains(&xevent.target) {
                         if xevent.target == self.atoms.targets {
