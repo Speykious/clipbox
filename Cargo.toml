@@ -5,5 +5,4 @@ version = "0.1.0"
 edition = "2021"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# loki-linux = { path = "../../loki-chat/lokinit/loki-linux" }
-loki-linux = { git = "https://github.com/loki-chat/lokinit.git", rev = "4e2d216" }
+loki-linux = { git = "https://github.com/loki-chat/lokinit.git", rev = "b34557e" }

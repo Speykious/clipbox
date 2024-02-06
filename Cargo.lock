@@ -12,4 +12,4 @@ dependencies = [
 [[package]]
 name = "loki-linux"
 version = "0.1.0"
-source = "git+https://github.com/loki-chat/lokinit.git?rev=4e2d216#4e2d216020b25e980d9840d1af8d9b237dc95a70"
+source = "git+https://github.com/loki-chat/lokinit.git?rev=b34557e#b34557eb1f7fd183b9740d3995d621e47e955868"

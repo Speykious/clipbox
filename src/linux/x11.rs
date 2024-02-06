@@ -5,8 +5,7 @@ use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 
 use loki_linux::x11::{
-    errcode, et, prop_mode, xevent_mask, Atom, Bool, LibX11, XDisplay, XErrorEvent, XEvent,
-    XSelectionEvent, XSelectionRequestEvent, XWindow,
+    self, errcode, et, prop_mode, property, xevent_mask, Atom, Bool, LibX11, XDisplay, XErrorEvent, XEvent, XSelectionEvent, XSelectionRequestEvent, XWindow
 };
 
 /// Just a boilerplate function to construct a const `&CStr`.
@@ -424,7 +423,7 @@ impl X11Clipboard {
         let status = unsafe {
             let long_offset: c_long = 0;
             let long_length: c_long = c_long::MAX;
-            let delete: Bool = 0;
+            let delete: Bool = x11::bool::FALSE;
             let req_type: Atom = 0;
 
             (self.x.XGetWindowProperty)(
@@ -519,8 +518,7 @@ impl X11Clipboard {
                         if xevent.type_id == et::PROPERTY_NOTIFY {
                             let xevent = xevent.xproperty;
 
-                            const NEW_VALUE: c_int = 0;
-                            if xevent.state == NEW_VALUE {
+                            if xevent.state == property::NEW_VALUE {
                                 break;
                             }
                         }
@@ -699,7 +697,7 @@ impl X11Clipboard {
                     (self.x.XFlush)(self.display.as_ptr());
                 } else if xevent.type_id == et::PROPERTY_NOTIFY {
                     let xevent = xevent.xproperty;
-                    if xevent.state != 1 {
+                    if xevent.state != property::DELETE {
                         // Not a Delete - move on
                         continue;
                     }
