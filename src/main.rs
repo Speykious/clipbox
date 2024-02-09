@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("[[Writing image]]");
         fs::write("image.png", selection)?;
     } else {
-        let selection = clipboard.get_selection(atom_names::CLIPBOARD, atom_names::STRING)?;
+        let selection = clipboard.get_selection(atom_names::CLIPBOARD, atom_names::UTF8_STRING)?;
         println!("[[Writing text]]");
         fs::write("string.txt", selection)?;
     }
