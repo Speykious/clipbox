@@ -19,15 +19,17 @@ Half of a platform works right now (X11). The priority is to get Linux fully wor
 
 - [ ] Cross-platform Rust API
 - [ ] FFI bindings
-- [x] Mimetype support for pasting
-- [x] Mimetype support for copying
-- [ ] Multi-mimetype copying (pain)
+- [ ] Documentation
 - [ ] Complete platform support
-  - [ ] Linux
-    - [x] X11
-    - [ ] Wayland
-  - [ ] MacOS
-  - [ ] Windows
+
+Native functionalities:
+
+| Platform      | Mimetype paste | Mimetype copy | Multi-mimetype copy (pain) |
+| ------------- | -------------- | ------------- | -------------------------- |
+| Linux X11     | ✔️              | ✔️             | ❌                          |
+| Linux Wayland | ❌              | ❌             | ❌                          |
+| MacOS         | ❌              | ❌             | ❌                          |
+| Windows       | ❌              | ❌             | ❌                          |
 
 ## Multi-mimetype copy? (not yet)
 
