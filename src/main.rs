@@ -4,7 +4,7 @@ use std::fs;
 use clipbox::linux::x11::{atom_names, mime_types, X11Clipboard};
 
 const MYSELF: &[u8] = "hello I'm really new (I swear) UTF8 text: 日本語".as_bytes();
-const MYSELF2: &[u8] = "hello I'm really really new (I swear) UTF8 text: 日本語".as_bytes();
+// const IMAGE: &[u8] = include_bytes!("../image.png");
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("[[Init X11 clipboard]]");
@@ -27,7 +27,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("[[Copying myself into clipboard]]");
     clipboard.set_selection(atom_names::CLIPBOARD, atom_names::UTF8_STRING, MYSELF)?;
-    clipboard.set_selection(atom_names::CLIPBOARD, atom_names::UTF8_STRING, MYSELF2)?;
 
     // println!("[[Copying image into clipboard]]");
     // clipboard.set_selection(atom_names::CLIPBOARD, mime_types::IMAGE_PNG, IMAGE)?;
