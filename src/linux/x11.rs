@@ -5,47 +5,36 @@ use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 
 use loki_linux::x11::{
-    self, errcode, et, prop_mode, property, xevent_mask, Atom, Bool, LibX11, XDisplay, XErrorEvent, XEvent, XSelectionEvent, XSelectionRequestEvent, XWindow
+    self, errcode, et, prop_mode, property, xevent_mask, Atom, Bool, LibX11, XDisplay, XErrorEvent,
+    XEvent, XSelectionEvent, XSelectionRequestEvent, XWindow,
 };
-
-/// Just a boilerplate function to construct a const `&CStr`.
-/// This is not safe at all, but in my defense, it's not public...
-///
-/// # Safety
-///
-/// Make sure to append the `\0` at the end!!
-const fn const_cstr(bytes: &[u8]) -> &CStr {
-    unsafe { CStr::from_bytes_with_nul_unchecked(bytes) }
-}
 
 pub mod atom_names {
     use std::ffi::CStr;
 
-    use super::const_cstr;
-
     /// The primary clipboard
-    pub const PRIMARY: &CStr = const_cstr(b"PRIMARY\0");
+    pub const PRIMARY: &CStr = c"PRIMARY";
     /// The secondary clipboard
-    pub const SECONDARY: &CStr = const_cstr(b"SECONDARY\0");
+    pub const SECONDARY: &CStr = c"SECONDARY";
     /// The actual clipboard that most apps use
-    pub const CLIPBOARD: &CStr = const_cstr(b"CLIPBOARD\0");
+    pub const CLIPBOARD: &CStr = c"CLIPBOARD";
     /// Our custom dummy atom
-    pub const CLIPBOX: &CStr = const_cstr(b"CLIPBOX\0");
+    pub const CLIPBOX: &CStr = c"CLIPBOX";
     /// Our custom dummy atom
-    pub const CLIPBOX_DUMMY: &CStr = const_cstr(b"CLIPBOX_DUMMY\0");
+    pub const CLIPBOX_DUMMY: &CStr = c"CLIPBOX_DUMMY";
 
     /// Property type: ASCII string
-    pub const STRING: &CStr = const_cstr(b"STRING\0");
+    pub const STRING: &CStr = c"STRING";
     /// Property type: text
-    pub const TEXT: &CStr = const_cstr(b"TEXT\0");
+    pub const TEXT: &CStr = c"TEXT";
     /// Property type: UTF8 string
-    pub const UTF8_STRING: &CStr = const_cstr(b"UTF8_STRING\0");
+    pub const UTF8_STRING: &CStr = c"UTF8_STRING";
     /// Property type: targets (list of atoms)
-    pub const TARGETS: &CStr = const_cstr(b"TARGETS\0");
+    pub const TARGETS: &CStr = c"TARGETS";
     /// Property type: incremental data fetching
-    pub const INCR: &CStr = const_cstr(b"INCR\0");
+    pub const INCR: &CStr = c"INCR";
     /// Property type: atom
-    pub const ATOM: &CStr = const_cstr(b"ATOM\0");
+    pub const ATOM: &CStr = c"ATOM";
 }
 
 /// Some commonly used mime types. They're literally infinite so the list cannot be exclusive.
@@ -54,15 +43,13 @@ pub mod mime_types {
 
     use std::ffi::CStr;
 
-    use super::const_cstr;
+    pub const TEXT_PLAIN: &CStr = c"text/plain";
+    pub const TEXT_PLAIN_CHARSET_UTF8: &CStr = c"text/plain;charset=utf-8";
+    pub const TEXT_HTML: &CStr = c"text/html";
 
-    pub const TEXT_PLAIN: &CStr = const_cstr(b"text/plain\0");
-    pub const TEXT_PLAIN_CHARSET_UTF8: &CStr = const_cstr(b"text/plain;charset=utf-8\0");
-    pub const TEXT_HTML: &CStr = const_cstr(b"text/html\0");
-
-    pub const IMAGE_PNG: &CStr = const_cstr(b"image/png\0");
-    pub const IMAGE_JPG: &CStr = const_cstr(b"image/jpg\0");
-    pub const IMAGE_JPEG: &CStr = const_cstr(b"image/jpeg\0");
+    pub const IMAGE_PNG: &CStr = c"image/png";
+    pub const IMAGE_JPG: &CStr = c"image/jpg";
+    pub const IMAGE_JPEG: &CStr = c"image/jpeg";
 }
 
 #[derive(Debug)]
